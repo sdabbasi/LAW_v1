@@ -1,0 +1,8 @@
+# -e git+ssh://git@github.com/Abyssaledge/FSDV2.git@fcb9b7c0c6e4d501bae31f196c6e269376383251#egg=mmdet3d
+# -e git+https://github.com/tencent/ncnn@03550ba532314870464456924891a510eb32e38c#egg=ncnn&subdirectory=python
+# -e git+ssh://git@github.com/Abyssaledge/TorchEx.git@32eabf726169c2c4437428425a6d27400f8efc3a#egg=torchex
+# olefile @ file:///home/conda/feedstock_root/build_artifacts/olefile_1602866521163/work
+# torch-scatter @ file:///usr/share/miniconda/envs/test/conda-bld/pytorch-scatter_1631018401613/work
+# waymo-open-dataset-tf-2-4-0==1.4.1
+# mkl-fft==1.3.1
+# mkl-random==1.2.2

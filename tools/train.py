@@ -6,6 +6,17 @@
  
 from __future__ import division
 
+# Fix for distutils compatibility issue with newer setuptools
+import distutils.version
+if not hasattr(distutils, 'version'):
+    from packaging import version
+    class LooseVersion:
+        def __init__(self, vstring=''):
+            self.vstring = vstring
+        def __str__(self):
+            return self.vstring
+    distutils.version.LooseVersion = LooseVersion
+
 import argparse
 import copy
 import mmcv

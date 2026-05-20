@@ -144,3 +144,4 @@ work_dirs/
 data/
 AGENTS.md
 mmdetection3d/
+vis_results/

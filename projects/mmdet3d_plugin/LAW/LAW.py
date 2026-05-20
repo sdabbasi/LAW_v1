@@ -14,7 +14,7 @@ from projects.mmdet3d_plugin.models.utils.grid_mask import GridMask
 from projects.mmdet3d_plugin.VAD.planner.metric_stp3 import PlanningMetric
 from mmdet3d.models import builder
 
-from projects.mmdet3d_plugin.LAW.utils import prj_pts_to_img, draw_lidar_pts, denormalize_img
+from projects.mmdet3d_plugin.LAW.utils import prj_ego_traj_to_2d, prj_pts_to_img, draw_lidar_pts, denormalize_img
 import matplotlib.pyplot as plt
 from ipdb import set_trace
 
@@ -300,6 +300,7 @@ class LAW(VAD):
             gt_bboxes_3d,
             gt_labels_3d,
             fut_valid_flag=fut_valid_flag,
+            img=cur_img,
             ego_his_trajs=ego_his_trajs,
             ego_fut_trajs=ego_fut_trajs,
             ego_fut_cmd=ego_fut_cmd,
@@ -319,6 +320,7 @@ class LAW(VAD):
         gt_bboxes_3d,
         gt_labels_3d,
         fut_valid_flag=None,
+        img=None,
         ego_his_trajs=None,
         ego_fut_trajs=None,
         ego_fut_cmd=None,
@@ -352,6 +354,33 @@ class LAW(VAD):
             
             ego_fut_preds = ego_fut_preds.cumsum(dim=-2)
             ego_fut_trajs = ego_fut_trajs.cumsum(dim=-2)
+            
+            # show_dir = None           #TODO: make it configurable
+            show_dir = "vis_results/"   #TODO: make it configurable
+            if show_dir is not None and img is not None:
+                try:
+                    os.makedirs(show_dir, exist_ok=True)
+                    if self.call_count % 2 == 0:
+                        # Visualize on cam0 of the current frame
+                        # img: [B, Ncam, C, H, W] (normalized)
+                        cam0 = img[0, 0].unsqueeze(0)
+                        cam0 = denormalize_img(cam0, img_metas)[0]
+                        img_np = cam0.permute(1, 2, 0).detach().cpu().numpy()
+                        img_np = np.clip(img_np, 0, 255).astype(np.uint8)
+                        img_np = np.ascontiguousarray(img_np)
+
+                        # Draw GT (green) and prediction (red)
+                        gt_pts_cam, gt_mask = prj_ego_traj_to_2d(ego_fut_trajs, img_metas)
+                        pred_for_vis = ego_fut_preds[0] if ego_fut_preds.dim() == 3 else ego_fut_preds
+                        pred_pts_cam, pred_mask = prj_ego_traj_to_2d(pred_for_vis, img_metas)
+
+                        img_np = draw_lidar_pts(gt_pts_cam, gt_mask, img_np, color=(0, 255, 0))
+                        img_np = draw_lidar_pts(pred_pts_cam, pred_mask, img_np, color=(0, 0, 255))
+
+                        out_path = os.path.join(show_dir, f'{self.call_count:06d}.jpg')
+                        cv2.imwrite(out_path, img_np)
+                except Exception as e:
+                    print(f'[LAW] Visualization failed once; continuing without vis. Error: {e}')
 
             metric_dict_planner_stp3 = self.compute_planner_metric_stp3(
                 pred_ego_fut_trajs = ego_fut_preds[None],

@@ -354,9 +354,18 @@ class LAW(VAD):
             
             ego_fut_preds = ego_fut_preds.cumsum(dim=-2)
             ego_fut_trajs = ego_fut_trajs.cumsum(dim=-2)
+
+            metric_dict_planner_stp3 = self.compute_planner_metric_stp3(
+                pred_ego_fut_trajs = ego_fut_preds[None],
+                gt_ego_fut_trajs = ego_fut_trajs[None],
+                gt_agent_boxes = gt_bbox,
+                gt_agent_feats = gt_attr_label.unsqueeze(0),
+                fut_valid_flag = fut_valid_flag
+            )
             
-            # show_dir = None           #TODO: make it configurable
-            show_dir = "vis_results/"   #TODO: make it configurable
+            show_dir = None           #TODO: make it configurable
+            # show_dir = "vis_results/"   #TODO: make it configurable
+            # os.makedirs("vis_results/", exist_ok=True)
             if show_dir is not None and img is not None:
                 try:
                     os.makedirs(show_dir, exist_ok=True)
@@ -381,14 +390,6 @@ class LAW(VAD):
                         cv2.imwrite(out_path, img_np)
                 except Exception as e:
                     print(f'[LAW] Visualization failed once; continuing without vis. Error: {e}')
-
-            metric_dict_planner_stp3 = self.compute_planner_metric_stp3(
-                pred_ego_fut_trajs = ego_fut_preds[None],
-                gt_ego_fut_trajs = ego_fut_trajs[None],
-                gt_agent_boxes = gt_bbox,
-                gt_agent_feats = gt_attr_label.unsqueeze(0),
-                fut_valid_flag = fut_valid_flag
-            )
 
             #mid print
             # update metrics

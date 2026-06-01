@@ -7,6 +7,7 @@ from .datasets.pipelines import (
   PhotoMetricDistortionMultiViewImage, PadMultiViewImage, 
   NormalizeMultiviewImage,  CustomCollect3D)
 from .models.backbones.vovnet import VoVNet
+from .models.backbones.clip_semantic_backbone import CLIPSemanticBackbone
 from .models.utils import *
 from .models.opt.adamw import AdamW2
 from .VAD import *

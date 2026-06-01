@@ -21,6 +21,8 @@ import argparse
 import copy
 import mmcv
 import os
+import re
+import tempfile
 import time
 import torch
 import warnings
@@ -45,6 +47,64 @@ cv2.setNumThreads(1)
 
 import sys
 sys.path.append('')
+
+
+_RUN_ID_RE = re.compile(r'^\d{8}_\d{6}$')
+
+
+def _timestamp_run_id() -> str:
+    return time.strftime('%Y%m%d_%H%M%S', time.localtime())
+
+
+def _read_or_create_run_id_file(run_id_file: str) -> str:
+    run_id = _timestamp_run_id()
+    try:
+        fd = os.open(run_id_file, os.O_CREAT | os.O_EXCL | os.O_WRONLY)
+        with os.fdopen(fd, 'w') as f:
+            f.write(run_id)
+        return run_id
+    except FileExistsError:
+        try:
+            with open(run_id_file, 'r') as f:
+                existing = f.read().strip()
+            if _RUN_ID_RE.fullmatch(existing):
+                return existing
+        except OSError:
+            pass
+        # Fallback: overwrite with a fresh run id.
+        try:
+            with open(run_id_file, 'w') as f:
+                f.write(run_id)
+        except OSError:
+            pass
+        return run_id
+
+
+def _maybe_timestamp_law_default_work_dir(work_dir: str, distributed: bool) -> str:
+    """If work_dir is exactly work_dirs/law/default, append a timestamp subdir."""
+    base_abs = osp.abspath(osp.join('work_dirs', 'law', 'default'))
+    work_abs = osp.abspath(work_dir)
+    if work_abs != base_abs:
+        return work_dir
+
+    tail = osp.basename(osp.normpath(work_dir))
+    if _RUN_ID_RE.fullmatch(tail):
+        return work_dir
+
+    env_run_id = os.getenv('LAW_RUN_ID')
+    if env_run_id and _RUN_ID_RE.fullmatch(env_run_id):
+        run_id = env_run_id
+    elif distributed:
+        # torch.distributed.launch spawns workers from a launcher process; all
+        # ranks share the same parent PID, so this gives a run-scoped key.
+        master_port = os.getenv('MASTER_PORT', '')
+        launcher_pid = os.getppid()
+        run_id_file = osp.join(tempfile.gettempdir(), f'law_run_id_{master_port}_{launcher_pid}')
+        run_id = _read_or_create_run_id_file(run_id_file)
+    else:
+        run_id = _timestamp_run_id()
+
+    return osp.join(work_dir, run_id)
 
 
 def parse_args():
@@ -165,6 +225,11 @@ def main():
         # use config filename as default work_dir if cfg.work_dir is None
         cfg.work_dir = osp.join('./work_dirs',
                                 osp.splitext(osp.basename(args.config))[0])
+
+    # Special case: if the user targets work_dirs/law/default, automatically
+    # create a timestamped subdirectory per run.
+    cfg.work_dir = _maybe_timestamp_law_default_work_dir(
+        cfg.work_dir, distributed=(args.launcher != 'none'))
     # if args.resume_from is not None:
     if args.resume_from is not None and osp.isfile(args.resume_from):
         cfg.resume_from = args.resume_from

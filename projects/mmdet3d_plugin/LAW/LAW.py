@@ -127,8 +127,12 @@ class LAW(VAD):
             # compute loss
             if not is_test:
                 # loss waypoint
-                gt_ego_fut_trajs = img_metas[0]['ego_fut_trajs'].to(img_feats.device)
-                gt_ego_fut_masks = img_metas[0]['ego_fut_masks'].squeeze(0).unsqueeze(-1).to(img_feats.device)
+                gt_ego_fut_trajs = torch.cat(
+                    [img_metas[b]['ego_fut_trajs'] for b in range(len(img_metas))], dim=0
+                ).to(img_feats.device)
+                gt_ego_fut_masks = torch.stack(
+                    [img_metas[b]['ego_fut_masks'].squeeze(0).squeeze(0) for b in range(len(img_metas))], dim=0
+                ).unsqueeze(-1).to(img_feats.device)
                 loss_waypoint = self.pts_bbox_head.loss_3d(pred_ego_fut_trajs,
                                                             gt_ego_fut_trajs,
                                                             gt_ego_fut_masks,
@@ -183,13 +187,23 @@ class LAW(VAD):
         cur_img = img[:, -1, ...]
         cur_img_metas = [each[len_queue-1] for each in img_metas]
 
-        cur_img_feats = self.extract_feat(img=cur_img, img_metas=cur_img_metas)[0]            
+        # Extract semantic BEFORE extract_feat: extract_img_feat squeezes cur_img
+        # in-place (squeeze_(0)) when B==1, making it 4-D afterwards.
+        semantic_feat = None
+        if self.use_semantic and hasattr(self, 'semantic_img_backbone'):
+            B, N_view, C, H, W = cur_img.shape
+            flat_img = cur_img.reshape(B * N_view, C, H, W)
+            semantic_feat = self.semantic_img_backbone(flat_img).reshape(B, N_view, -1)
+
+        cur_img_feats = self.extract_feat(img=cur_img, img_metas=cur_img_metas)[0]
+
         losses = self.forward_pts_train(cur_img_feats, 
                                         cur_img_metas,
                                         pred_img_feat=pred_img_feat,
                                         ego_his_trajs=ego_his_trajs, ego_fut_trajs=ego_fut_trajs,
                                         ego_fut_masks=ego_fut_masks, ego_fut_cmd=ego_fut_cmd,
                                         ego_lcf_feat=ego_lcf_feat, gt_attr_labels=gt_attr_labels,
+                                        semantic_feat=semantic_feat,
                                     )
         losses.update(prev_frame_losses)
         return losses
@@ -204,6 +218,7 @@ class LAW(VAD):
                           ego_fut_cmd=None,
                           ego_lcf_feat=None,
                           gt_attr_labels=None,
+                          semantic_feat=None,
                         ):
         """Forward function
         Args:
@@ -220,7 +235,7 @@ class LAW(VAD):
         ego_info = torch.cat([ego_his_trajs, ego_lcf_feat, ego_fut_cmd], dim=1)
         
         prev_pred_img_feat = pred_img_feat
-        preds_ego_future_traj, cur_img_feat, pred_img_feat = self.pts_bbox_head(img_feats, img_metas, ego_info)
+        preds_ego_future_traj, cur_img_feat, pred_img_feat = self.pts_bbox_head(img_feats, img_metas, ego_info, semantic_feat=semantic_feat)
         
         # world model loss
         loss_rec = self.pts_bbox_head.loss_reconstruction(
@@ -232,7 +247,7 @@ class LAW(VAD):
         # waypoint loss
         loss_waypoint = self.pts_bbox_head.loss_3d(preds_ego_future_traj,
                                             ego_fut_trajs.squeeze(1),
-                                            ego_fut_masks.squeeze(0).squeeze(0).unsqueeze(-1),
+                                            ego_fut_masks.squeeze(1).squeeze(1).unsqueeze(-1),
                                             )
         losses.update({
             'loss_waypoint': loss_waypoint
@@ -291,7 +306,13 @@ class LAW(VAD):
         cur_img = img[:, -1, ...]
         cur_img_metas = [each[len_queue-1] for each in img_metas]
 
-        cur_img_feats = self.extract_feat(img=cur_img, img_metas=cur_img_metas)[0]  
+        semantic_feat = None
+        if self.use_semantic and hasattr(self, 'semantic_img_backbone'):
+            B, N_view, C, H, W = cur_img.shape
+            flat_img = cur_img.reshape(B * N_view, C, H, W)
+            semantic_feat = self.semantic_img_backbone(flat_img).reshape(B, N_view, -1)
+
+        cur_img_feats = self.extract_feat(img=cur_img, img_metas=cur_img_metas)[0]
 
         bbox_list = [dict() for i in range(len(img_metas))]
         metric_dict = self.simple_test_pts(
@@ -306,6 +327,7 @@ class LAW(VAD):
             ego_fut_cmd=ego_fut_cmd,
             ego_lcf_feat=ego_lcf_feat,
             gt_attr_labels=gt_attr_labels,
+            semantic_feat=semantic_feat,
         )
         
         for result_dict in bbox_list:
@@ -326,6 +348,7 @@ class LAW(VAD):
         ego_fut_cmd=None,
         ego_lcf_feat=None,
         gt_attr_labels=None,
+        semantic_feat=None,
     ):
         """Test function"""
         B = ego_his_trajs.size(0)
@@ -335,8 +358,9 @@ class LAW(VAD):
         ego_info = torch.cat([ego_his_trajs_, ego_lcf_feat_, ego_fut_cmd_], dim=1)
 
         preds_ego_future_traj, _, _ = self.pts_bbox_head(
-                                        img_feats, 
-                                        img_metas, 
+                                        img_feats,
+                                        img_metas,
+                                        semantic_feat=semantic_feat,
                                     )
 
         with torch.no_grad():

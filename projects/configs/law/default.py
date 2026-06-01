@@ -50,6 +50,7 @@ model = dict(
     video_test_mode=True,
     use_multi_view=True,
     use_swin=True,
+    use_semantic=False,
     swin_input_channel=768,
     hidden_channel=256,
     img_backbone=dict(
@@ -76,8 +77,9 @@ model = dict(
         dropout=0.1,
         use_wm=True,
         num_traj_modal=3,
-        ),
-    )
+        use_semantic=False,
+    ),
+)
 
 dataset_type = 'VADCustomNuScenesDataset'
 data_root = 'data/nuscenes/'
@@ -125,7 +127,7 @@ test_pipeline = [
 ]
 
 data = dict(
-    samples_per_gpu=1,
+    samples_per_gpu=3,
     workers_per_gpu=8,
     train=dict(
         type=dataset_type,
@@ -177,6 +179,8 @@ data = dict(
     nonshuffler_sampler=dict(type='DistributedSampler')
 )
 
+find_unused_parameters = False
+
 optimizer = dict(
     type='AdamW',
     lr=5e-5,
@@ -195,7 +199,7 @@ lr_config = dict(
     warmup_ratio=1.0 / 3,
     min_lr_ratio=1e-3)
 
-evaluation = dict(interval=total_epochs, pipeline=test_pipeline, metric='bbox', map_metric='chamfer')
+evaluation = dict(interval=3, pipeline=test_pipeline, metric='bbox', map_metric='chamfer')
 
 runner = dict(type='EpochBasedRunner', max_epochs=total_epochs)
 

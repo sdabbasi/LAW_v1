@@ -50,6 +50,8 @@ class WaypointHead(BaseModule):
                 num_spatial_token=36,
                 num_tf_layers=2,
                 num_traj_modal=1,
+                use_semantic=False,
+                vlm_hidden_channel=768,
                 **kwargs,
                 ):
         """
@@ -57,6 +59,10 @@ class WaypointHead(BaseModule):
         """
         super().__init__(**kwargs)
         self.use_wm = use_wm
+        self.use_semantic = use_semantic
+
+        if self.use_semantic:
+            self.semantic_proj = nn.Linear(vlm_hidden_channel, hidden_channel)
 
         # query feature
         self.num_views = num_views
@@ -97,13 +103,22 @@ class WaypointHead(BaseModule):
         )
         self._wm_decoder = nn.TransformerDecoder(wm_decoder_layer, num_tf_layers) 
 
-        self.action_aware_encoder = nn.Sequential(
-            nn.Linear(hidden_channel + 6*2, hidden_channel),
-            nn.ReLU(inplace=True),
-            nn.Linear(hidden_channel, hidden_channel),
-            nn.ReLU(inplace=True),
-            nn.Linear(hidden_channel, hidden_channel)
-        )
+        if self.use_semantic:
+            self.action_aware_encoder = nn.Sequential(
+                nn.Linear(hidden_channel * 2 + 6*2, hidden_channel),
+                nn.ReLU(inplace=True),
+                nn.Linear(hidden_channel, hidden_channel),
+                nn.ReLU(inplace=True),
+                nn.Linear(hidden_channel, hidden_channel)
+            )
+        else:
+            self.action_aware_encoder = nn.Sequential(
+                nn.Linear(hidden_channel + 6*2, hidden_channel),
+                nn.ReLU(inplace=True),
+                nn.Linear(hidden_channel, hidden_channel),
+                nn.ReLU(inplace=True),
+                nn.Linear(hidden_channel, hidden_channel)
+            )
         
         # loss
         self.loss_plan_reg = build_loss(dict(type='L1Loss', loss_weight=1.0))
@@ -178,10 +193,13 @@ class WaypointHead(BaseModule):
 
         coords = coords.unsqueeze(-1)
 
-        lidar2img = torch.from_numpy(np.stack(img_metas[0]['lidar2img'])).to(img_feats.device).float()
-        lidar2img = lidar2img[:num_views]
-        img2lidars = lidar2img.inverse()
-        img2lidars = img2lidars.view(num_views, 1, 1, 4, 4).repeat(B, H*W, D, 1, 1).view(B, LEN, D, 4, 4)
+        # Build per-sample lidar2img: (B, num_views, 4, 4)
+        lidar2img = torch.stack([
+            torch.from_numpy(np.stack(img_metas[b]['lidar2img'])[:num_views]).float()
+            for b in range(B)
+        ], dim=0).to(img_feats.device)
+        img2lidars = torch.stack([lidar2img[b].inverse() for b in range(B)], dim=0)
+        img2lidars = img2lidars.view(B, num_views, 1, 1, 4, 4).repeat(1, 1, H*W, D, 1, 1).view(B, LEN, D, 4, 4)
 
         coords3d = torch.matmul(img2lidars, coords).squeeze(-1)[..., :3]
         coords3d[..., 0:3] = (coords3d[..., 0:3] - self.position_range[0:3]) / (self.position_range[3:6] - self.position_range[0:3]) #normalize
@@ -191,7 +209,7 @@ class WaypointHead(BaseModule):
         coords_position_embeding = self.position_encoder(pos_embed)
         return coords_position_embeding
     
-    def forward(self, img_feat, img_metas, ego_info=None, is_test=False):
+    def forward(self, img_feat, img_metas, ego_info=None, semantic_feat=None, is_test=False):
         # init
         losses = {}
         Bz, num_views, num_channels, height, width = img_feat.shape
@@ -213,19 +231,31 @@ class WaypointHead(BaseModule):
         batch_size, num_view, num_tokens, num_channel = spatial_view_feat.shape
         spatial_view_feat = spatial_view_feat.reshape(batch_size, -1, num_channel)
 
+        if self.use_semantic and semantic_feat is not None:
+            if semantic_feat.dim() == 2:
+                semantic_feat = semantic_feat.unsqueeze(1)
+            proj_semantic_feat = self.semantic_proj(semantic_feat)
+            memory_feat = torch.cat([spatial_view_feat, proj_semantic_feat], dim=1)
+        else:
+            memory_feat = spatial_view_feat
+            proj_semantic_feat = None
+
         # predict wp
-        updated_waypoint_query_feat = self.wp_attn(init_waypoint_query_feat, spatial_view_feat) #final_view_feat.shape torch.Size([1, 1440, 256])
+        updated_waypoint_query_feat = self.wp_attn(init_waypoint_query_feat, memory_feat) #final_view_feat.shape torch.Size([1, 1440, 256])
         cur_waypoint = self.waypoint_head(updated_waypoint_query_feat)
 
         if self.num_traj_modal > 1:
             assert self.num_traj_modal == 3
             bz, traj_len, _ = cur_waypoint.shape
             cur_waypoint = cur_waypoint.reshape(bz, traj_len, self.num_traj_modal, 2)
-            ego_cmd = img_metas[0]['ego_fut_cmd'].to(img_feat.device)[0, 0]
-            cur_waypoint = cur_waypoint[: ,: ,ego_cmd == 1].squeeze(2)
+            selected = []
+            for b in range(bz):
+                ego_cmd_b = img_metas[b]['ego_fut_cmd'].to(img_feat.device)[0, 0]
+                selected.append(cur_waypoint[b, :, ego_cmd_b == 1].squeeze(1))
+            cur_waypoint = torch.stack(selected, dim=0)
 
         # world model prediction
-        wm_next_latent = self.wm_prediction(spatial_view_feat, cur_waypoint)
+        wm_next_latent = self.wm_prediction(spatial_view_feat, cur_waypoint, proj_semantic_feat)
 
         return cur_waypoint, spatial_view_feat, wm_next_latent
     
@@ -236,10 +266,23 @@ class WaypointHead(BaseModule):
         loss_rec = self.loss_plan_rec(reconstructed_view_query_feat, observed_view_query_feat)
         return loss_rec
     
-    def wm_prediction(self, view_query_feat, cur_waypoint):
+    def wm_prediction(self, view_query_feat, cur_waypoint, proj_semantic_feat=None):
         batch_size, num_tokens, num_channel = view_query_feat.shape
         cur_waypoint = cur_waypoint.reshape(batch_size, 1, -1).repeat(1, num_tokens, 1)
-        cur_view_query_feat_with_ego = torch.cat([view_query_feat, cur_waypoint], dim=-1) 
+
+        if self.use_semantic:
+            # Pool semantic tokens; fall back to zeros when semantic is unavailable
+            # (e.g. history frames) so the encoder always receives the expected 524-dim input.
+            if proj_semantic_feat is not None:
+                sem_pool = proj_semantic_feat.mean(dim=1, keepdim=True).repeat(1, num_tokens, 1)
+            else:
+                sem_pool = torch.zeros(batch_size, num_tokens, num_channel,
+                                       device=view_query_feat.device,
+                                       dtype=view_query_feat.dtype)
+            cur_view_query_feat_with_ego = torch.cat([view_query_feat, sem_pool, cur_waypoint], dim=-1)
+        else:
+            cur_view_query_feat_with_ego = torch.cat([view_query_feat, cur_waypoint], dim=-1)
+
         action_aware_latent = self.action_aware_encoder(cur_view_query_feat_with_ego)
 
         wm_next_latent = self._wm_decoder(action_aware_latent, action_aware_latent)
